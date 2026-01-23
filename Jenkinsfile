@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   tools {
-    nodejs 'node22' // Using LTS for stability
+    nodejs 'node25' // Using LTS for stability
   }
 
   // Define a variable at the top level to share the decision between stages
