@@ -16,23 +16,25 @@ pipeline {
       }
     }
 
-    stage('SAST Scan') {
+    // Consolidated Security Scan
+    stage('Security Scan - Trivy') {
       steps {
-        echo 'SAST Scan executed'
-      }
-    }
-
-    stage('Dependency Scan') {
-      steps {
-        echo 'Dependency Scan executed'
-        sh 'trivy fs . --format json > trivy.json'
+        echo 'Running Vulnerability and Secret Scans...'
+        sh '''
+          trivy fs . \
+            --scanners vuln,secret \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --format json \
+            -o trivy-report.json
+        '''
       }
     }
 
     stage('Send Report') {
       steps {
         echo 'Report sent to Decision Engine'
-        sh 'curl -X POST http://decision-engine/api/report -d @trivy.json'
+        // Updated to use the new filename: trivy-report.json
+        sh 'curl -X POST http://decision-engine/api/report -d @trivy-report.json'
       }
     }
   }
