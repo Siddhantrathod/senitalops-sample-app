@@ -2,61 +2,40 @@ pipeline {
   agent any
 
   tools {
-    nodejs 'node25'   // must exist in Jenkins tool config
+    nodejs 'node22' // Using LTS for stability
+  }
+
+  // Define a variable at the top level to share the decision between stages
+  environment {
+    SECURITY_DECISION = ""
   }
 
   stages {
-
     stage('Build') {
       steps {
-        echo 'Building the application'
         sh 'npm install'
-      }
-    }
-
-    stage('Unit Test') {
-      steps {
-        sh 'npm test || true'
       }
     }
 
     stage('Security Scan - Trivy') {
       steps {
-        script {
-          echo 'Downloading and Running Trivy...'
-
-          sh '''
-            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b . v0.49.1
-            
-            ./trivy fs . \
-              --scanners vuln,secret \
-              --severity CRITICAL,HIGH,MEDIUM \
-              --format json \
-              -o trivy-report.json
-          '''
-        }
+        sh '''
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b . v0.49.1
+          ./trivy fs . --scanners vuln,secret --severity CRITICAL,HIGH,MEDIUM --format json -o trivy-report.json
+        '''
       }
     }
 
     stage('Security Decision Engine') {
       steps {
         script {
-          echo 'Starting Decision Engine and Sending Report...'
           dir('Decision-engine') {
-            // Install dependencies for the engine itself
             sh 'npm install'
-            // Start the engine in the background
             sh 'node index.js &' 
-            // Give it a moment to boot up
             sh 'sleep 5'
           }
-          
-          // Now that it's running on localhost:4000, send the report
-          sh '''
-            curl -X POST http://localhost:4000/evaluate \
-              -H "Content-Type: application/json" \
-              --data @trivy-report.json
-          '''
+          // Save result to a file
+          sh 'curl -X POST http://localhost:4000/evaluate -H "Content-Type: application/json" --data @trivy-report.json > decision.json'
         }
       }
     }
@@ -64,38 +43,35 @@ pipeline {
     stage('Policy Enforcement') {
       steps {
         script {
-          sh '''
-            decision=$(cat decision.json | jq -r .decision)
-            score=$(cat decision.json | jq -r .security_score)
+          def report = readJSON file: 'decision.json'
+          // Store decision in the environment variable
+          env.SECURITY_DECISION = report.decision
+          
+          echo "Decision: ${env.SECURITY_DECISION} | Score: ${report.security_score}"
 
-            echo "=============================="
-            echo "Security Score: $score"
-            echo "Decision: $decision"
-            echo "=============================="
-
-            if [ "$decision" = "BLOCKED" ]; then
-              echo "❌ Deployment Blocked by Security Policy"
-              exit 1
-            fi
-          '''
+          if (env.SECURITY_DECISION != 'APPROVED') {
+            error "Pipeline halted: Security policy not met (${env.SECURITY_DECISION})"
+          }
         }
       }
     }
 
     stage('Deploy') {
       when {
-        expression {
-          return sh(
-            script: "jq -r .decision decision.json",
-            returnStdout: true
-          ).trim() == "APPROVED"
-        }
+        // Use the variable we set in the previous stage instead of 'jq'
+        expression { env.SECURITY_DECISION == 'APPROVED' }
       }
       steps {
         echo "✅ Deploying application securely..."
-        sh 'echo Deployment Successful'
       }
     }
+  }
 
+  post {
+    always {
+      // Kill the Decision Engine so port 4000 is free for the next run
+      echo 'Cleaning up background processes...'
+      sh 'pkill -f "node index.js" || true'
+    }
   }
 }
