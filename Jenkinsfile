@@ -40,12 +40,24 @@ pipeline {
 
     stage('Security Decision Engine') {
       steps {
-        echo 'Sending report to Decision Engine'
-        sh '''
-          curl -X POST http://localhost:4000/evaluate \
-          -H "Content-Type: application/json" \
-          --data @trivy-report.json > decision.json
-        '''
+        script {
+          echo 'Starting Decision Engine and Sending Report...'
+          dir('Decision-engine') {
+            // Install dependencies for the engine itself
+            sh 'npm install'
+            // Start the engine in the background
+            sh 'node index.js &' 
+            // Give it a moment to boot up
+            sh 'sleep 5'
+          }
+          
+          // Now that it's running on localhost:4000, send the report
+          sh '''
+            curl -X POST http://localhost:4000/evaluate \
+              -H "Content-Type: application/json" \
+              --data @trivy-report.json
+          '''
+        }
       }
     }
 
