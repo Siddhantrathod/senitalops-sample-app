@@ -2,15 +2,15 @@ pipeline {
   agent any
 
   tools {
-    nodejs 'node22' // Using LTS for stability
+    nodejs 'node22'
   }
 
-  // Define a variable at the top level to share the decision between stages
   environment {
-    SECURITY_DECISION = ""
+    SECURITY_DECISION = ''
   }
 
   stages {
+
     stage('Build') {
       steps {
         sh 'npm install'
@@ -21,7 +21,11 @@ pipeline {
       steps {
         sh '''
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b . v0.49.1
-          ./trivy fs . --scanners vuln,secret --severity CRITICAL,HIGH,MEDIUM --format json -o trivy-report.json
+          ./trivy fs . \
+            --scanners vuln,secret \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --format json \
+            -o trivy-report.json
         '''
       }
     }
@@ -31,11 +35,29 @@ pipeline {
         script {
           dir('Decision-engine') {
             sh 'npm install'
-            sh 'node index.js &' 
-            sh 'sleep 5'
+
+            // Start decision engine in background and store PID
+            sh 'nohup node index.js > decision-engine.log 2>&1 & echo $! > decision-engine.pid'
           }
-          // Save result to a file
-          sh 'curl -X POST http://localhost:4000/evaluate -H "Content-Type: application/json" --data @trivy-report.json > decision.json'
+
+          // Wait until service is actually ready
+          sh '''
+            for i in {1..10}; do
+              curl -sf http://localhost:4000/evaluate && break
+              sleep 1
+            done
+          '''
+
+          // Call API and save response
+          sh '''
+            curl -s -X POST http://localhost:4000/evaluate \
+              -H "Content-Type: application/json" \
+              --data @trivy-report.json \
+              -o decision.json
+          '''
+
+          // Safety check
+          sh 'cat decision.json'
         }
       }
     }
@@ -44,10 +66,11 @@ pipeline {
       steps {
         script {
           def report = readJSON file: 'decision.json'
-          // Store decision in the environment variable
+
           env.SECURITY_DECISION = report.decision
-          
+
           echo "Decision: ${env.SECURITY_DECISION} | Score: ${report.security_score}"
+          echo "Stats: Critical=${report.stats.critical}, High=${report.stats.high}, Medium=${report.stats.medium}"
 
           if (env.SECURITY_DECISION != 'APPROVED') {
             error "Pipeline halted: Security policy not met (${env.SECURITY_DECISION})"
@@ -58,7 +81,6 @@ pipeline {
 
     stage('Deploy') {
       when {
-        // Use the variable we set in the previous stage instead of 'jq'
         expression { env.SECURITY_DECISION == 'APPROVED' }
       }
       steps {
@@ -69,9 +91,12 @@ pipeline {
 
   post {
     always {
-      // Kill the Decision Engine so port 4000 is free for the next run
-      echo 'Cleaning up background processes...'
-      sh 'pkill -f "node index.js" || true'
+      echo 'Cleaning up Decision Engine...'
+      sh '''
+        if [ -f Decision-engine/decision-engine.pid ]; then
+          kill $(cat Decision-engine/decision-engine.pid) || true
+        fi
+      '''
     }
   }
 }
